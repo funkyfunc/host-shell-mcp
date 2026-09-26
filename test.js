@@ -57,7 +57,8 @@ test("run_command", async (t) => {
 
   await t.test("lists the tools with the right annotations", async () => {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((x) => x.name), ["run_command", "request_write_access"]);
+    assert.deepEqual(tools.map((x) => x.name), ["run_command", "read_output", "stop_command", "request_write_access"]);
+    assert.equal(tools.find((x) => x.name === "read_output").annotations.readOnlyHint, true);
     assert.equal(tools[0].annotations.destructiveHint, true);
     assert.equal(tools[0].annotations.readOnlyHint, false);
     assert.match(tools[0].description, /Nothing is undoable/);
@@ -148,9 +149,27 @@ test("run_command", async (t) => {
     assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false);
   });
 
-  await t.test("large output is truncated", async () => {
-    const r = await run(client, { command: "head -c 1000000 /dev/zero | tr '\\0' x" });
-    assert.match(r.text, /output truncated at 200000 bytes/);
+  await t.test("long output keeps its start and end, and all of it is saved", async () => {
+    const r = await run(client, { command: "echo FIRST-LINE; head -c 1000000 /dev/zero | tr '\\0' x; echo; echo LAST-LINE" });
+    assert.match(r.text, /FIRST-LINE/);
+    assert.match(r.text, /LAST-LINE/);
+    const [, omitted, file] = r.text.match(/\[… (\d+) bytes omitted; full output: (\S+) …\]/);
+    assert.ok(Number(omitted) > 900_000);
+    assert.ok(r.text.length < 50_000);
+    const saved = readFileSync(file, "utf8");
+    assert.match(saved, /^FIRST-LINE\n/);
+    assert.match(saved, /LAST-LINE\n$/);
+    assert.equal(statSync(file).mode & 0o777, 0o600);
+  });
+
+  await t.test("short output isn't saved to a file", async () => {
+    const r = await run(client, { command: "echo small" });
+    assert.doesNotMatch(r.text, /full output/);
+  });
+
+  await t.test("git and gh can't prompt or page", async () => {
+    const r = await run(client, { command: "echo $GIT_TERMINAL_PROMPT $GIT_PAGER $PAGER $GH_PROMPT_DISABLED $GCM_INTERACTIVE" });
+    assert.match(r.text, /0 cat cat 1 never/);
   });
 
   await t.test("concurrent calls", async () => {
@@ -158,6 +177,95 @@ test("run_command", async (t) => {
     const rs = await Promise.all([1, 2, 3].map((n) => run(client, { command: `sleep 1; echo ${n}` })));
     rs.forEach((r, i) => assert.match(r.text, new RegExp(`stdout ---\n${i + 1}`)));
     assert.ok(Date.now() - start < 2500, "should run in parallel");
+  });
+});
+
+test("long-running commands", async (t) => {
+  const client = await connect();
+  t.after(() => client.close());
+  const jobId = (text) => Number(text.match(/job_id (\d+)/)[1]);
+
+  await t.test("a slow command returns a job, then read_output waits for it", async () => {
+    const start = Date.now();
+    const r = await run(client, { command: "echo early; sleep 2; echo late", wait_seconds: 1 });
+    assert.ok(Date.now() - start < 2000);
+    assert.equal(r.isError, false);
+    assert.match(r.text, /^Still running after 1s \(job_id \d+\)/);
+    assert.match(r.text, /--- stdout so far ---\nearly/);
+    const done = await call(client, "read_output", { job_id: jobId(r.text) });
+    assert.match(done.text, /^Exit code: 0/);
+    assert.match(done.text, /late/);
+    assert.doesNotMatch(done.text, /early/, "only new output");
+    const again = await call(client, "read_output", { job_id: jobId(r.text) });
+    assert.equal(again.isError, true);
+    assert.match(again.text, /no job/);
+  });
+
+  await t.test("read_output returns early when there's nothing yet, if asked", async () => {
+    const r = await run(client, { command: "sleep 2", wait_seconds: 0 });
+    const peek = await call(client, "read_output", { job_id: jobId(r.text), wait_seconds: 0 });
+    assert.match(peek.text, /^Still running/);
+    assert.match((await call(client, "read_output", { job_id: jobId(r.text) })).text, /^Exit code: 0/);
+  });
+
+  await t.test("stop_command stops the whole tree", async () => {
+    const pidFile = join(work, "stop.pid");
+    const r = await run(client, { command: `sleep 300 & echo $! > ${pidFile}; wait`, wait_seconds: 1 });
+    const stopped = await call(client, "stop_command", { job_id: jobId(r.text) });
+    assert.match(stopped.text, /Stopped with stop_command/);
+    await sleep(200);
+    assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false);
+  });
+
+  await t.test("the time limit still applies after the call returns", async () => {
+    const r = await run(client, { command: "sleep 300", wait_seconds: 1, timeout_seconds: 2 });
+    const done = await call(client, "read_output", { job_id: jobId(r.text), wait_seconds: 10 });
+    assert.match(done.text, /^Timed out after 2s/);
+  });
+
+  await t.test("cancelling read_output stops the command", async () => {
+    const pidFile = join(work, "cancel-read.pid");
+    const r = await run(client, { command: `echo $$ > ${pidFile}; sleep 300`, wait_seconds: 1 });
+    const ac = new AbortController();
+    const pending = call(client, "read_output", { job_id: jobId(r.text) }, { signal: ac.signal });
+    await sleep(300);
+    ac.abort();
+    await assert.rejects(pending);
+    await sleep(500);
+    assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false);
+  });
+
+  await t.test("progress notifications are sent while waiting", async () => {
+    const updates = [];
+    const r = await client.callTool({ name: "run_command", arguments: { command: "sleep 11; echo ok" } }, undefined,
+      { onprogress: (p) => updates.push(p), timeout: 30_000 });
+    assert.match(r.content[0].text, /ok/);
+    assert.ok(updates.length >= 1);
+    assert.match(updates[0].message, /running for \d+s/);
+  });
+});
+
+test("VM paths", async (t) => {
+  const project = dir("work/vm-project-x7");
+  dir("work/dup-x7"); dir("work2/dup-x7");
+  const client = await connect({ config: makeConfig({ write: [work, join(tmp, "work2")] }) });
+  t.after(() => client.close());
+
+  await t.test("a VM shared-folder path is translated when unambiguous", async () => {
+    const r = await run(client, { command: "pwd", cwd: "/sessions/brave-owl/mnt/vm-project-x7/sub/.." });
+    assert.match(r.text, /translated to the host path/);
+    assert.match(r.text, /vm-project-x7/);
+    const r2 = await run(client, { command: "pwd", cwd: "/sessions/brave-owl/mnt/vm-project-x7" });
+    assert.match(r2.text, new RegExp(`stdout ---\n${realpathSync(project)}`));
+  });
+
+  await t.test("ambiguous or unknown folders are errors, not guesses", async () => {
+    const dup = await run(client, { command: "pwd", cwd: "/sessions/brave-owl/mnt/dup-x7" });
+    assert.equal(dup.isError, true);
+    assert.match(dup.text, /several host folders/);
+    const none = await run(client, { command: "pwd", cwd: "/sessions/brave-owl/mnt/no-such-folder-x7" });
+    assert.equal(none.isError, true);
+    assert.match(none.text, /no host folder named/);
   });
 });
 
@@ -333,7 +441,7 @@ test("request_write_access", macOnly, async (t) => {
   });
 });
 
-test("client disconnect stops running commands and exits the server", async () => {
+test("client disconnect stops running commands and jobs, and exits the server", async () => {
   const pidFile = join(work, "disconnect.pid");
   const server = spawn(serverCmd, serverArgs, { stdio: ["pipe", "pipe", "ignore"], env: { ...process.env, HOST_SHELL_MCP_CONFIG: mainConfig } });
   const exited = new Promise((r) => server.on("exit", (code) => r(code)));
@@ -345,8 +453,10 @@ test("client disconnect stops running commands and exits the server", async () =
   send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "1" } } });
   send({ method: "notifications/initialized" });
   server.stdin.write("this is not json\n"); // must be ignored, not fatal
-  send({ id: 2, method: "tools/call", params: { name: "run_command", arguments: { command: `echo $$ > ${pidFile}; sleep 300` } } });
-  await sleep(1000);
+  // wait_seconds: 1, so by the time the client leaves the command is a background job.
+  send({ id: 2, method: "tools/call", params: { name: "run_command", arguments: { command: `echo $$ > ${pidFile}; sleep 300`, wait_seconds: 1 } } });
+  await sleep(1500);
+  assert.match(stdout, /Still running/);
   const pid = Number(readFileSync(pidFile, "utf8"));
   assert.equal(isAlive(pid), true);
 

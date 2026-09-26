@@ -14,10 +14,10 @@ Cowork's **Add connector** box only takes URLs, and Anthropic's cloud (not your 
 
 ```bash
 npm install
-npm run build
+npm run cowork-plugin
 ```
 
-This writes `dist/host-shell-mcp-plugin-<version>.zip`. In Claude, open **Customize → Plugins**, choose the upload option, and select the zip. To check it's running on your Mac and not in the VM, ask Claude to run `uname -a` with it: `Darwin` means your Mac.
+This writes `dist/host-shell-mcp-cowork-plugin.zip`. In Claude, open **Customize → Plugins**, choose the upload option, and select the zip. To check it's running on your Mac and not in the VM, ask Claude to run `uname -a` with it: `Darwin` means your Mac.
 
 The plugin's launcher finds Node.js on its own (Homebrew, nvm, Volta, fnm, mise, asdf), because apps opened from the Dock don't see your shell's `PATH`. If it picks the wrong one, set `HOST_SHELL_MCP_NODE` to the path of the `node` you want.
 
@@ -46,7 +46,7 @@ write_caches = [            # temp and cache folders tools like npm, pip and git
 deny_read = []              # folders commands may not read at all
 shell = ""                  # empty = your login shell
 default_cwd = "~"
-timeout_seconds = 120
+timeout_seconds = 600       # commands running longer are stopped
 log_file = "~/Library/Logs/host-shell-mcp/commands.jsonl"
 ```
 
@@ -82,9 +82,14 @@ Commands run under macOS's Seatbelt sandbox (`sandbox-exec`), the same mechanism
 
 ## Tools
 
-**`run_command(command, cwd?, timeout_seconds?, stdin?)`** returns the exit code, stdout and stderr, each capped at 200 KB. A non-zero exit sets `isError`. When the sandbox blocks something, the result says so and tells Claude about `request_write_access`.
+| Tool | What it does |
+|---|---|
+| `run_command(command, cwd?, timeout_seconds?, wait_seconds?, stdin?)` | Runs a command. Returns the exit code, stdout and stderr, or a `job_id` if the command is still running after `wait_seconds` (default 30). A non-zero exit sets `isError`. |
+| `read_output(job_id, wait_seconds?)` | Waits for a running command (up to `wait_seconds`, default 30) and returns the output it produced since the last look. Marked read-only. |
+| `stop_command(job_id)` | Stops a running command and everything it started. |
+| `request_write_access(paths, reason)` | Shows the permission dialog on your Mac. |
 
-**`request_write_access(paths, reason)`** shows the permission dialog on your Mac.
+When the sandbox blocks something, the result says so and tells Claude about `request_write_access`.
 
 ## Behavior
 
@@ -93,7 +98,11 @@ Commands run under macOS's Seatbelt sandbox (`sandbox-exec`), the same mechanism
 - **Fresh shell per call.** `cd` and `export` don't carry over. It's an interactive login shell (`$SHELL -ilc`), so your `.zprofile` and `.zshrc` load and `PATH` matches your terminal. That adds about 0.4 s per command with nvm.
 - **Bash-style globbing under zsh.** A glob that matches nothing is passed through as-is instead of aborting with "no matches found".
 - **No TTY, and stdin is closed.** Commands that prompt (sudo, ssh passwords) get EOF and fail instead of hanging. Use the `stdin` argument to feed input.
-- **Timeouts and cancellation kill the whole process tree:** SIGTERM, then SIGKILL 2 seconds later.
+- **Long commands don't block.** `run_command` waits 30 seconds by default, under the roughly 60-second limit many MCP clients put on one call. A command still running after that becomes a job: Claude gets the output so far and a `job_id`, and follows up with `read_output` or `stop_command`. The command keeps running until it finishes or reaches `timeout_seconds`. While a call waits, the server sends progress notifications, so clients that support them can keep it alive.
+- **Timeouts, `stop_command` and cancellation kill the whole process tree:** SIGTERM, then SIGKILL 2 seconds later. Cancelling a call that's waiting on a command (for example, pressing stop in the app) stops that command too.
+- **Long output keeps its start and end.** Each stream shows its first 20 KB and last 20 KB, where errors usually are. Anything in between is saved to a file next to the log (`~/Library/Logs/host-shell-mcp/output/`), and the result gives its path. Output files are deleted after a day.
+- **git and gh never prompt or page.** Commands get `GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`, `GIT_PAGER=cat`, `PAGER=cat` and `GH_PROMPT_DISABLED=1`, so a missing credential fails right away instead of hanging.
+- **VM paths are translated when it's safe.** Cowork shows your shared folders inside its VM as `/sessions/<id>/mnt/<folder>`, and Claude sometimes passes those as `cwd`. The server translates such a path when exactly one host folder with that name exists, looking in your allowed folders and the usual places like `~/Development` and `~/Desktop`, and says so in the result. If there's no match or more than one, Claude gets an error asking for the host path instead of a guess.
 - **Background jobs don't block.** `cmd &` returns as soon as the shell exits, and the job keeps running. Redirect its output (`nohup cmd > /tmp/cmd.log 2>&1 &`).
 - **Client disconnect.** When stdin closes, stdout breaks, or the server gets a signal, it stops running commands and exits.
 - **stdout is protocol only.** All logging goes to stderr.
@@ -102,7 +111,7 @@ Commands run under macOS's Seatbelt sandbox (`sandbox-exec`), the same mechanism
 
 ```bash
 npm test                               # against server.js
-npm run build && npm run test:plugin   # against the packaged plugin
+npm run cowork-plugin && npm run test:plugin   # against the packaged plugin
 ```
 
 The tests start the real server over stdio with throwaway settings. They cover the sandbox, including scripts in other languages and attempts to edit the settings. A test hook stands in for the dialog.

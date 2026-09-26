@@ -24,7 +24,7 @@ const DEFAULTS = {
   deny_read: [],
   shell: "",
   default_cwd: "~",
-  timeout_seconds: 120,
+  timeout_seconds: 600,
   log_file: DEFAULT_LOG,
 };
 
@@ -59,7 +59,9 @@ shell = ${JSON.stringify(c.shell)}
 # Where commands run when Claude doesn't say.
 default_cwd = ${JSON.stringify(c.default_cwd)}
 
-# Default time limit per command, in seconds. Claude can ask for up to 3600.
+# Commands running longer than this many seconds are stopped. Long commands don't
+# block Claude (it gets a job id and checks back), so this can be generous.
+# Claude can ask for up to 3600 for a single command.
 timeout_seconds = ${c.timeout_seconds}
 
 # Every command is recorded here, one JSON object per line.

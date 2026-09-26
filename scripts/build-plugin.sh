@@ -1,6 +1,7 @@
 #!/bin/sh
 # Bundles server.js (with its dependencies) into plugin/server.mjs and zips the
-# plugin into dist/, ready to upload in Cowork under Customize > Plugins.
+# plugin into dist/host-shell-mcp-cowork-plugin.zip, ready to upload in Cowork
+# under Customize > Plugins.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -22,7 +23,8 @@ fs.writeFileSync("plugin/.claude-plugin/plugin.json", JSON.stringify({
 ' "$version" "$description"
 
 mkdir -p dist
-zip_path="dist/host-shell-mcp-plugin-$version.zip"
+zip_path="dist/host-shell-mcp-cowork-plugin.zip"
 rm -f "$zip_path"
 (cd plugin && zip -qrX "../$zip_path" .claude-plugin .mcp.json scripts server.mjs)
-echo "$zip_path"
+echo "Built host-shell-mcp $version: $zip_path"
+echo "Install it in Claude under Customize > Plugins > upload (remove the old version first)."
