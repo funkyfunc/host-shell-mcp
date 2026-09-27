@@ -1,0 +1,15 @@
+{
+  "name": "host-shell-mcp",
+  "description": "Run shell commands on your real computer from Claude Cowork, confined to the folders you allow, with native macOS approval prompts.",
+  "owner": {
+    "name": "funkyfunc",
+    "url": "https://github.com/funkyfunc"
+  },
+  "plugins": [
+    {
+      "name": "host-shell-mcp",
+      "source": "./plugin",
+      "description": "Run shell commands on your real computer from Claude Cowork, confined to the folders you allow, with native macOS approval prompts."
+    }
+  ]
+}

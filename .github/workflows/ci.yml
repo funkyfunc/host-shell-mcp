@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # The sandbox is macOS-only, so test where it actually runs.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Build the Cowork plugin
+        run: npm run cowork-plugin
+      - name: Test the packaged plugin
+        run: npm run test:plugin
+      # Cowork installs the plugin straight from this repo, so the committed
+      # build must match the source. Fix: npm run cowork-plugin, then commit plugin/.
+      - name: Check the committed plugin is up to date
+        run: git diff --exit-code -- plugin/

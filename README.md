@@ -12,12 +12,13 @@ An MCP server that lets an AI agent working in a sandbox or VM, like Claude in C
 
 Cowork's **Add connector** box only takes URLs, and Anthropic's cloud (not your computer) connects to those URLs, so a local server can't go there. Install it as a plugin instead. Claude Desktop starts a plugin's local MCP servers on your computer.
 
-```bash
-npm install
-npm run cowork-plugin
-```
+1. In Claude, open **Customize → Plugins → Add → Add marketplace** and enter `funkyfunc/host-shell-mcp`.
+2. Install **host-shell-mcp** from it.
+3. Turn on **Sync automatically** for the marketplace, so new releases arrive without you doing anything.
 
-This writes `dist/host-shell-mcp-cowork-plugin.zip`. In Claude, open **Customize → Plugins**, choose the upload option, and select the zip. To check it's running on your Mac and not in the VM, ask Claude to run `uname -a` with it: `Darwin` means your Mac.
+To check it's running on your Mac and not in the VM, ask Claude to run `uname -a` with it: `Darwin` means your Mac.
+
+To install from a file instead, run `npm install && npm run cowork-plugin` and upload `dist/host-shell-mcp-cowork-plugin.zip` under **Customize → Plugins → Add → Upload plugin**.
 
 The plugin's launcher finds Node.js on its own (Homebrew, nvm, Volta, fnm, mise, asdf), because apps opened from the Dock don't see your shell's `PATH`. If it picks the wrong one, set `HOST_SHELL_MCP_NODE` to the path of the `node` you want.
 
@@ -115,3 +116,16 @@ npm run cowork-plugin && npm run test:plugin   # against the packaged plugin
 ```
 
 The tests start the real server over stdio with throwaway settings. They cover the sandbox, including scripts in other languages and attempts to edit the settings. A test hook stands in for the dialog.
+
+## Releasing
+
+This repo is also the Cowork marketplace: `.claude-plugin/marketplace.json` points at `plugin/`, and Cowork installs straight from `main`. Cowork only picks up a new release when the plugin's version changes, so every release needs a version bump:
+
+```bash
+npm version patch --no-git-tag-version   # or minor / major
+npm run cowork-plugin                    # rebuilds plugin/ (bundle + version) and the zip
+npm test && npm run test:plugin
+git commit -am "Release x.y.z" && git push
+```
+
+CI runs the tests on macOS and fails if the committed `plugin/` doesn't match what the source builds, so a stale bundle never reaches the marketplace.
