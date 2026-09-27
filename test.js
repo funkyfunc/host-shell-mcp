@@ -39,6 +39,11 @@ const mainConfig = makeConfig();
 
 const isAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A stopped process can take a moment to disappear, especially on a busy CI machine.
+async function gone(pid, ms = 3000) {
+  for (const end = Date.now() + ms; Date.now() < end; await sleep(50)) if (!isAlive(pid)) return true;
+  return !isAlive(pid);
+}
 
 async function connect({ config = mainConfig, dialog, dialogLog } = {}) {
   const env = { ...process.env, HOST_SHELL_MCP_CONFIG: config };
@@ -116,7 +121,7 @@ test("run_command", async (t) => {
     assert.match(r.text, /Timed out after 1s/);
     assert.ok(Date.now() - start < 5000);
     await sleep(200);
-    assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false, "background sleep should be killed");
+    assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true, "background sleep should be killed");
   });
 
   await t.test("SIGTERM-ignoring command is SIGKILLed", async () => {
@@ -146,7 +151,7 @@ test("run_command", async (t) => {
     ac.abort();
     await assert.rejects(pending);
     await sleep(500);
-    assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false);
+    assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true);
   });
 
   await t.test("long output keeps its start and end, and all of it is saved", async () => {
@@ -214,7 +219,7 @@ test("long-running commands", async (t) => {
     const stopped = await call(client, "stop_command", { job_id: jobId(r.text) });
     assert.match(stopped.text, /Stopped with stop_command/);
     await sleep(200);
-    assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false);
+    assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true);
   });
 
   await t.test("the time limit still applies after the call returns", async () => {
@@ -232,7 +237,7 @@ test("long-running commands", async (t) => {
     ac.abort();
     await assert.rejects(pending);
     await sleep(500);
-    assert.equal(isAlive(Number(readFileSync(pidFile, "utf8"))), false);
+    assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true);
   });
 
   await t.test("progress notifications are sent while waiting", async () => {
@@ -242,6 +247,30 @@ test("long-running commands", async (t) => {
     assert.match(r.content[0].text, /ok/);
     assert.ok(updates.length >= 1);
     assert.match(updates[0].message, /running for \d+s/);
+  });
+});
+
+// An interactive bash behaves differently from zsh (job control, ignoring
+// SIGTERM), so check that stopping still reaches everything a command started.
+test("bash as the shell", async (t) => {
+  const client = await connect({ config: makeConfig({ shell: "/bin/bash" }) });
+  t.after(() => client.close());
+  const jobId = (text) => Number(text.match(/job_id (\d+)/)[1]);
+
+  await t.test("stop_command reaches background jobs, promptly", async () => {
+    const pidFile = join(work, "bash-stop.pid");
+    const r = await run(client, { command: `sleep 300 & echo $! > ${pidFile}; wait`, wait_seconds: 1 });
+    const start = Date.now();
+    assert.match((await call(client, "stop_command", { job_id: jobId(r.text) })).text, /Stopped with stop_command/);
+    assert.ok(Date.now() - start < 1500, "SIGTERM should end bash without waiting for SIGKILL");
+    assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true);
+  });
+
+  await t.test("timeouts reach background jobs", async () => {
+    const pidFile = join(work, "bash-timeout.pid");
+    const r = await run(client, { command: `sleep 300 & echo $! > ${pidFile}; wait`, timeout_seconds: 1 });
+    assert.match(r.text, /Timed out/);
+    assert.equal(await gone(Number(readFileSync(pidFile, "utf8"))), true);
   });
 });
 
@@ -462,7 +491,7 @@ test("client disconnect stops running commands and jobs, and exits the server", 
 
   server.stdin.end(); // client goes away
   assert.equal(await exited, 0);
-  assert.equal(isAlive(pid), false, "running command should be killed");
+  assert.equal(await gone(pid), true, "running command should be killed");
 
   // stdout must contain only JSON-RPC messages.
   for (const line of stdout.trim().split("\n")) assert.equal(JSON.parse(line).jsonrpc, "2.0");

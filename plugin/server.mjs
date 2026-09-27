@@ -36484,6 +36484,52 @@ var StdioServerTransport = class {
   }
 };
 
+// package.json
+var package_default = {
+  name: "host-shell-mcp",
+  version: "1.3.1",
+  description: "Run shell commands on your real computer from an AI sandbox or VM, confined to the folders you allow, with native macOS approval prompts",
+  main: "server.js",
+  scripts: {
+    start: "node server.js",
+    test: "node --test test.js",
+    build: "scripts/build-plugin.sh",
+    "test:plugin": 'HOST_SHELL_MCP_TEST_CMD="[\\"/bin/sh\\",\\"plugin/scripts/start.sh\\"]" node --test test.js',
+    "cowork-plugin": "scripts/build-plugin.sh"
+  },
+  type: "module",
+  dependencies: {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "smol-toml": "^1.9.0",
+    zod: "^4.6.5"
+  },
+  license: "MIT",
+  author: "funkyfunc",
+  bin: {
+    "host-shell-mcp": "server.js"
+  },
+  files: [
+    "server.js",
+    "config.js",
+    "sandbox.js",
+    "dialog.js",
+    "output.js",
+    "paths.js",
+    "README.md"
+  ],
+  engines: {
+    node: ">=20.10"
+  },
+  devDependencies: {
+    esbuild: "^0.28.2"
+  },
+  repository: {
+    type: "git",
+    url: "git+https://github.com/funkyfunc/host-shell-mcp.git"
+  },
+  homepage: "https://github.com/funkyfunc/host-shell-mcp#readme"
+};
+
 // config.js
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -37606,7 +37652,12 @@ var NON_INTERACTIVE_ENV = {
 console.log = console.info = console.debug = console.error;
 var log = (...args) => console.error(`[host-shell-mcp ${(/* @__PURE__ */ new Date()).toISOString()}]`, ...args);
 var shellFor = (config2) => config2.shell || process.env.SHELL || userInfo().shell || "/bin/sh";
-var scriptPrefix = (shell) => basename3(shell) === "zsh" ? "setopt no_nomatch; " : "";
+function scriptPrefix(shell) {
+  const name = basename3(shell);
+  if (name === "zsh") return "setopt no_nomatch no_monitor; ";
+  if (["bash", "sh", "ksh", "dash"].includes(name)) return "set +m; trap 'exit 143' TERM; ";
+  return "";
+}
 var sessionWrites = [];
 var outputDir = (config2) => join5(dirname4(expandPath(config2.log_file)), "output");
 var brokenLog = null;
@@ -37805,7 +37856,7 @@ function describeAccess(config2) {
   }
   return `Access: commands can read everywhere but write only in: ${listPaths(config2.write.map(expandPath))} (plus temp and cache folders)${config2.deny_read.length ? `; reading is blocked in ${listPaths(config2.deny_read.map(expandPath))}` : ""}. The OS enforces this on everything a command starts. Launching apps (open) and AppleScript are disabled. To write elsewhere, call request_write_access; the user approves on their Mac.`;
 }
-var server = new McpServer({ name: "host-shell-mcp", version: "1.3.0" });
+var server = new McpServer({ name: "host-shell-mcp", version: package_default.version });
 server.registerTool(
   "run_command",
   {

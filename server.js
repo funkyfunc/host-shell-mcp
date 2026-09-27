@@ -12,6 +12,7 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import pkg from "./package.json" with { type: "json" };
 import { abbreviate, CONFIG_PATH, ensureConfig, expandPath, loadConfig, SANDBOX_SUPPORTED, saveWriteList } from "./config.js";
 import { askUser, DIALOG_TIMEOUT_S } from "./dialog.js";
 import { HEAD_BYTES, Output, pruneOutputFiles, TAIL_BYTES } from "./output.js";
@@ -42,10 +43,19 @@ const log = (...args) => console.error(`[host-shell-mcp ${new Date().toISOString
 // Apps launched from the Dock may not have $SHELL set, so fall back to the login shell from the user database.
 const shellFor = (config) => config.shell || process.env.SHELL || userInfo().shell || "/bin/sh";
 
-// zsh aborts a command when a glob matches nothing ("no matches found"). Callers
-// expect bash behaviour (the pattern is passed through as-is), so turn that off.
-// It goes after the rc files have run, on the same line so error line numbers don't shift.
-const scriptPrefix = (shell) => (basename(shell) === "zsh" ? "setopt no_nomatch; " : "");
+// Per-shell setup, run after the rc files and on the same line as the command
+// (so error line numbers don't shift):
+// - zsh aborts a command when a glob matches nothing ("no matches found").
+//   Callers expect bash behaviour (the pattern is passed through as-is).
+// - An interactive bash/sh turns on job control, which moves `&` jobs into
+//   their own process group where stop and timeouts can't reach them, and it
+//   ignores SIGTERM. Turn job control off and let SIGTERM end the shell.
+function scriptPrefix(shell) {
+  const name = basename(shell);
+  if (name === "zsh") return "setopt no_nomatch no_monitor; ";
+  if (["bash", "sh", "ksh", "dash"].includes(name)) return "set +m; trap 'exit 143' TERM; ";
+  return "";
+}
 
 // Folders granted with "Allow this session" (real paths). Gone when the server exits.
 const sessionWrites = [];
@@ -282,7 +292,7 @@ function describeAccess(config) {
     `To write elsewhere, call request_write_access; the user approves on their Mac.`;
 }
 
-const server = new McpServer({ name: "host-shell-mcp", version: "1.3.0" });
+const server = new McpServer({ name: "host-shell-mcp", version: pkg.version });
 
 server.registerTool(
   "run_command",
